@@ -3,6 +3,18 @@ import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from './useAuth';
 import { useEffect } from 'react';
 
+let sharedNotificationsChannel: ReturnType<typeof supabase.channel> | null = null;
+let sharedNotificationsUserId: string | null = null;
+let notificationsSubscriberCount = 0;
+
+const removeSharedNotificationsChannel = async () => {
+  if (!sharedNotificationsChannel) return;
+
+  await supabase.removeChannel(sharedNotificationsChannel);
+  sharedNotificationsChannel = null;
+  sharedNotificationsUserId = null;
+};
+
 export interface NotificationWithActor {
   id: string;
   user_id: string;
@@ -38,45 +50,70 @@ export function useNotifications() {
 
       if (error) throw error;
 
-      // Fetch actor profiles separately
-      const withActors = await Promise.all(
-        (data || []).map(async (notif: any) => {
-          const { data: actor } = await supabase
-            .from('profiles')
-            .select('id, username, display_name, avatar_url')
-            .eq('id', notif.actor_id)
-            .maybeSingle();
+      const actorIds = [...new Set((data || []).map((n: any) => n.actor_id))];
+      const { data: actors } = await supabase
+        .from('profiles')
+        .select('id, username, display_name, avatar_url')
+        .in('id', actorIds);
 
-          return {
-            ...notif,
-            actor: actor || { id: notif.actor_id, username: 'unknown', display_name: 'Unknown', avatar_url: null },
-          } as NotificationWithActor;
-        })
-      );
+      const actorMap = new Map((actors || []).map(a => [a.id, a]));
 
-      return withActors;
+      return (data || []).map((notif: any) => ({
+        ...notif,
+        actor: actorMap.get(notif.actor_id) || {
+          id: notif.actor_id,
+          username: 'unknown',
+          display_name: 'Unknown',
+          avatar_url: null,
+        },
+      })) as NotificationWithActor[];
     },
     enabled: !!user,
   });
 
-  // Realtime subscription
   useEffect(() => {
     if (!user) return;
 
-    const channel = supabase
-      .channel('notifications-realtime')
-      .on('postgres_changes', {
-        event: 'INSERT',
-        schema: 'public',
-        table: 'notifications',
-        filter: `user_id=eq.${user.id}`,
-      }, () => {
-        queryClient.invalidateQueries({ queryKey: ['notifications'] });
-      })
-      .subscribe();
+    notificationsSubscriberCount += 1;
 
-    return () => { supabase.removeChannel(channel); };
-  }, [user, queryClient]);
+    const channelName = `notifications-realtime-${user.id}`;
+
+    if (sharedNotificationsChannel && sharedNotificationsUserId !== user.id) {
+      void removeSharedNotificationsChannel();
+    }
+
+    if (!sharedNotificationsChannel) {
+      const existingChannel = supabase
+        .getChannels()
+        .find((channel) => channel.topic === `realtime:${channelName}`);
+
+      if (existingChannel) {
+        void supabase.removeChannel(existingChannel);
+      }
+
+      sharedNotificationsChannel = supabase
+        .channel(channelName)
+        .on('postgres_changes', {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'notifications',
+          filter: `user_id=eq.${user.id}`,
+        }, () => {
+          queryClient.invalidateQueries({ queryKey: ['notifications'] });
+        })
+        .subscribe();
+
+      sharedNotificationsUserId = user.id;
+    }
+
+    return () => {
+      notificationsSubscriberCount = Math.max(notificationsSubscriberCount - 1, 0);
+
+      if (notificationsSubscriberCount === 0) {
+        void removeSharedNotificationsChannel();
+      }
+    };
+  }, [user?.id, queryClient]);
 
   return query;
 }
