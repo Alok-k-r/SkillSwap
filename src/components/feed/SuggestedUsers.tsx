@@ -3,7 +3,7 @@ import { useProfiles } from '@/hooks/useProfiles';
 import { useAuth } from '@/hooks/useAuth';
 import { UserCard } from '@/components/users/UserCard';
 import { Skeleton } from '@/components/ui/skeleton';
-
+ 
 export function SuggestedUsers() {
   const { user } = useAuth();
   const { data: profiles, isLoading } = useProfiles();
